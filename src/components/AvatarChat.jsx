@@ -9,11 +9,17 @@ export default function AvatarChat() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isVoiceModeEnabled, setIsVoiceModeEnabled] = useState(false);
+  const [voiceMode, setVoiceMode] = useState('push-to-talk'); // 'push-to-talk' or 'continuous'
 
   const videoRef = useRef();
   const audioRef = useRef();
   const roomRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const localAudioTrackRef = useRef(null);
 
   // Auto-scroll to bottom when new messages arrive
   const scrollToBottom = () => {
@@ -67,7 +73,6 @@ export default function AvatarChat() {
           const isFinal = reader.info.attributes['lk.transcription_final'] === 'true';
           const segmentId = reader.info.attributes['lk.segment_id'];
           
-          // Only add final transcriptions to avoid duplicates
           if (isFinal && message.trim()) {
             setMessages(prev => [
               ...prev,
@@ -89,6 +94,7 @@ export default function AvatarChat() {
 
       room.on(RoomEvent.Disconnected, () => {
         setIsConnected(false);
+        stopVoiceMode();
         setMessages(prev => [
           ...prev,
           { 
@@ -122,12 +128,174 @@ export default function AvatarChat() {
     }
   };
 
+  // Enable continuous voice mode
+  const enableVoiceMode = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
+
+      const audioTrack = stream.getAudioTracks()[0];
+      
+      // Publish audio track to LiveKit
+      await roomRef.current.localParticipant.publishTrack(audioTrack, {
+        source: Track.Source.Microphone,
+        name: 'user-microphone'
+      });
+
+      localAudioTrackRef.current = audioTrack;
+      setIsVoiceModeEnabled(true);
+
+      setMessages(prev => [
+        ...prev,
+        { 
+          sender: "System", 
+          text: "🎤 Voice mode enabled. Speak naturally - Jane will respond!", 
+          timestamp: new Date(),
+          key: Date.now() 
+        }
+      ]);
+
+    } catch (error) {
+      console.error("Failed to enable voice mode:", error);
+      alert("Failed to access microphone. Please check permissions.");
+    }
+  };
+
+  // Disable continuous voice mode
+  const stopVoiceMode = () => {
+    if (localAudioTrackRef.current) {
+      localAudioTrackRef.current.stop();
+      localAudioTrackRef.current = null;
+    }
+    
+    if (roomRef.current && roomRef.current.localParticipant) {
+      const micTrack = roomRef.current.localParticipant.getTrackBySource(Track.Source.Microphone);
+      if (micTrack) {
+        roomRef.current.localParticipant.unpublishTrack(micTrack);
+      }
+    }
+
+    setIsVoiceModeEnabled(false);
+    
+    setMessages(prev => [
+      ...prev,
+      { 
+        sender: "System", 
+        text: "🔇 Voice mode disabled.", 
+        timestamp: new Date(),
+        key: Date.now() 
+      }
+    ]);
+  };
+
+  // Start recording (push-to-talk)
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        } 
+      });
+
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm'
+      });
+
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        
+        // Convert blob to base64 and send
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64Audio = reader.result.split(',')[1];
+          
+          // Send audio to avatar
+          await sendAudioMessage(base64Audio);
+        };
+        reader.readAsDataURL(audioBlob);
+
+        // Stop all tracks
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      mediaRecorderRef.current = mediaRecorder;
+      setIsRecording(true);
+
+      setMessages(prev => [
+        ...prev,
+        { 
+          sender: "System", 
+          text: "🎤 Recording... Release button when done", 
+          timestamp: new Date(),
+          key: Date.now() 
+        }
+      ]);
+
+    } catch (error) {
+      console.error("Failed to start recording:", error);
+      alert("Failed to access microphone. Please check permissions.");
+    }
+  };
+
+  // Stop recording
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      mediaRecorderRef.current = null;
+      setIsRecording(false);
+    }
+  };
+
+  // Send audio message via text (for transcription by avatar)
+  const sendAudioMessage = async (base64Audio) => {
+    try {
+      setIsLoading(true);
+
+      // In FULL mode, we need to send text, so we'll need to transcribe first
+      // For now, let's send a placeholder and let the avatar handle it
+      await roomRef.current.localParticipant.sendText("[Voice message sent]", {
+        topic: 'lk.chat',
+      });
+
+      setMessages(prev => [
+        ...prev,
+        { 
+          sender: "You", 
+          text: "🎤 [Voice message]", 
+          timestamp: new Date(),
+          key: `user-audio-${Date.now()}` 
+        }
+      ]);
+
+      setIsLoading(false);
+    } catch (error) {
+      setIsLoading(false);
+      console.error("Failed to send audio:", error);
+    }
+  };
+
+  // Send text message
   const handleSend = async () => {
     if (!input.trim() || !roomRef.current || isLoading) return;
 
     const userMessage = input.trim();
     
-    // Add user message to chat
     setMessages(prev => [
       ...prev, 
       { 
@@ -170,6 +338,7 @@ export default function AvatarChat() {
 
   const disconnect = () => {
     if (roomRef.current) {
+      stopVoiceMode();
       roomRef.current.disconnect();
       roomRef.current = null;
       setIsConnected(false);
@@ -178,6 +347,7 @@ export default function AvatarChat() {
 
   useEffect(() => {
     return () => {
+      stopVoiceMode();
       if (roomRef.current) {
         roomRef.current.disconnect();
       }
@@ -219,6 +389,19 @@ export default function AvatarChat() {
 
       {isConnected && (
         <div className="chat-section">
+          {/* Voice Mode Toggle */}
+          <div className="voice-controls">
+            <button
+              onClick={isVoiceModeEnabled ? stopVoiceMode : enableVoiceMode}
+              className={`voice-mode-button ${isVoiceModeEnabled ? 'active' : ''}`}
+            >
+              {isVoiceModeEnabled ? '🔊 Voice Mode ON' : '🎤 Enable Voice Mode'}
+            </button>
+            {isVoiceModeEnabled && (
+              <span className="voice-indicator">Listening...</span>
+            )}
+          </div>
+
           <div className="messages-window">
             {messages.map((msg) => (
               <div 
@@ -252,12 +435,26 @@ export default function AvatarChat() {
               onKeyPress={handleKeyPress}
               placeholder="Type your message..."
               className="chat-input"
-              disabled={isLoading}
+              disabled={isLoading || isVoiceModeEnabled}
             />
+            
+            {/* Push-to-Talk Button */}
+            <button
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onTouchStart={startRecording}
+              onTouchEnd={stopRecording}
+              className={`record-button ${isRecording ? 'recording' : ''}`}
+              disabled={isVoiceModeEnabled}
+              title="Hold to record"
+            >
+              {isRecording ? '🔴' : '🎤'}
+            </button>
+
             <button
               onClick={handleSend}
               className="send-button"
-              disabled={!input.trim() || isLoading}
+              disabled={!input.trim() || isLoading || isVoiceModeEnabled}
             >
               Send
             </button>
