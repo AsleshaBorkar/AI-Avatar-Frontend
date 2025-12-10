@@ -1,0 +1,13 @@
+services:
+  frontend:
+    image: aslesha18/ai-avatar-frontend:latest
+    container_name: ai-avatar-frontend
+    restart: always
+    ports:
+      - "80:80"
+    networks:
+      - ai-avatar-network
+
+networks:
+  ai-avatar-network:
+    external: true
