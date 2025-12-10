@@ -1,4 +1,3 @@
-aslesha@Ubuntu1:~/projects/AI-Avatar-Frontend$ cat Dockerfile
 # ---- Build Stage ----
 FROM node:18 AS build
 
