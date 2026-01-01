@@ -1,6 +1,5 @@
 const API_URL = import.meta.env.VITE_API_URL;
 
-
 export async function createSession() {
   const res = await fetch(`${API_URL}/session/create`, {
     method: "POST"
