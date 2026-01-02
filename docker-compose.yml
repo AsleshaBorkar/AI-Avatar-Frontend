@@ -14,4 +14,4 @@ networks:
   ai-avatar-network:
     external: true
 
-~
+
